@@ -47,7 +47,7 @@ public final class EpollDatagramChannelConfig extends EpollChannelConfig impleme
                 ChannelOption.SO_REUSEADDR, ChannelOption.IP_MULTICAST_LOOP_DISABLED,
                 ChannelOption.IP_MULTICAST_ADDR, ChannelOption.IP_MULTICAST_IF, ChannelOption.IP_MULTICAST_TTL,
                 ChannelOption.IP_TOS, ChannelOption.DATAGRAM_CHANNEL_ACTIVE_ON_REGISTRATION,
-                EpollChannelOption.SO_REUSEPORT, EpollChannelOption.IP_TRANSPARENT,
+                EpollChannelOption.SO_REUSEPORT, EpollChannelOption.IP_FREEBIND, EpollChannelOption.IP_TRANSPARENT,
                 EpollChannelOption.IP_RECVORIGDSTADDR);
     }
 
@@ -90,6 +90,9 @@ public final class EpollDatagramChannelConfig extends EpollChannelConfig impleme
         if (option == EpollChannelOption.IP_TRANSPARENT) {
             return (T) Boolean.valueOf(isIpTransparent());
         }
+        if (option == EpollChannelOption.IP_FREEBIND) {
+            return (T) Boolean.valueOf(isFreeBind());
+        }
         if (option == EpollChannelOption.IP_RECVORIGDSTADDR) {
             return (T) Boolean.valueOf(isIpRecvOrigDestAddr());
         }
@@ -123,6 +126,8 @@ public final class EpollDatagramChannelConfig extends EpollChannelConfig impleme
             setActiveOnOpen((Boolean) value);
         } else if (option == EpollChannelOption.SO_REUSEPORT) {
             setReusePort((Boolean) value);
+        } else if (option == EpollChannelOption.IP_FREEBIND) {
+            setFreeBind((Boolean) value);
         } else if (option == EpollChannelOption.IP_TRANSPARENT) {
             setIpTransparent((Boolean) value);
         } else if (option == EpollChannelOption.IP_RECVORIGDSTADDR) {
@@ -321,12 +326,21 @@ public final class EpollDatagramChannelConfig extends EpollChannelConfig impleme
 
     @Override
     public int getTimeToLive() {
-        return -1;
+        try {
+            return ((EpollDatagramChannel) channel).socket.getTimeToLive();
+        } catch (IOException e) {
+            throw new ChannelException(e);
+        }
     }
 
     @Override
     public EpollDatagramChannelConfig setTimeToLive(int ttl) {
-        throw new UnsupportedOperationException("Multicast not supported");
+        try {
+            ((EpollDatagramChannel) channel).socket.setTimeToLive(ttl);
+            return this;
+        } catch (IOException e) {
+            throw new ChannelException(e);
+        }
     }
 
     @Override
@@ -336,7 +350,12 @@ public final class EpollDatagramChannelConfig extends EpollChannelConfig impleme
 
     @Override
     public EpollDatagramChannelConfig setInterface(InetAddress interfaceAddress) {
-        throw new UnsupportedOperationException("Multicast not supported");
+        try {
+            ((EpollDatagramChannel) channel).socket.setInterface(interfaceAddress);
+            return this;
+        } catch (IOException e) {
+            throw new ChannelException(e);
+        }
     }
 
     @Override
@@ -346,7 +365,12 @@ public final class EpollDatagramChannelConfig extends EpollChannelConfig impleme
 
     @Override
     public EpollDatagramChannelConfig setNetworkInterface(NetworkInterface networkInterface) {
-        throw new UnsupportedOperationException("Multicast not supported");
+        try {
+            ((EpollDatagramChannel) channel).socket.setNetworkInterface(networkInterface);
+            return this;
+        } catch (IOException e) {
+            throw new ChannelException(e);
+        }
     }
 
     @Override
@@ -401,6 +425,31 @@ public final class EpollDatagramChannelConfig extends EpollChannelConfig impleme
     public EpollDatagramChannelConfig setIpTransparent(boolean ipTransparent) {
         try {
             ((EpollDatagramChannel) channel).socket.setIpTransparent(ipTransparent);
+            return this;
+        } catch (IOException e) {
+            throw new ChannelException(e);
+        }
+    }
+
+    /**
+     * Returns {@code true} if <a href="http://man7.org/linux/man-pages/man7/ip.7.html">IP_FREEBIND</a> is enabled,
+     * {@code false} otherwise.
+     */
+    public boolean isFreeBind() {
+        try {
+            return ((EpollDatagramChannel) channel).socket.isIpFreeBind();
+        } catch (IOException e) {
+            throw new ChannelException(e);
+        }
+    }
+
+    /**
+     * If {@code true} is used <a href="http://man7.org/linux/man-pages/man7/ip.7.html">IP_FREEBIND</a> is enabled,
+     * {@code false} for disable it. Default is disabled.
+     */
+    public EpollDatagramChannelConfig setFreeBind(boolean freeBind) {
+        try {
+            ((EpollDatagramChannel) channel).socket.setIpFreeBind(freeBind);
             return this;
         } catch (IOException e) {
             throw new ChannelException(e);

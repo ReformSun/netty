@@ -414,28 +414,11 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
         }
     }
 
-    // Allow to override for testing
-    void flush0(ChannelHandlerContext ctx) {
+    final void flush0(ChannelHandlerContext ctx) {
         flush(ctx);
     }
 
-    /**
-     * Return bytes to flow control.
-     * <p>
-     * Package private to allow to override for testing
-     * @param ctx The {@link ChannelHandlerContext} associated with the parent channel.
-     * @param stream The object representing the HTTP/2 stream.
-     * @param bytes The number of bytes to return to flow control.
-     * @return {@code true} if a frame has been written as a result of this method call.
-     * @throws Http2Exception If this operation violates the flow control limits.
-     */
-    boolean onBytesConsumed(@SuppressWarnings("unused") ChannelHandlerContext ctx,
-                         Http2FrameStream stream, int bytes) throws Http2Exception {
-        return consumeBytes(stream.id(), bytes);
-    }
-
-    // Allow to extend for testing
-    static class Http2MultiplexCodecStream extends DefaultHttp2FrameStream {
+    static final class Http2MultiplexCodecStream extends DefaultHttp2FrameStream {
         DefaultHttp2StreamChannel channel;
     }
 
@@ -444,6 +427,26 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
         // about non-writability state as soon as the first Http2HeaderFrame is written (if needed).
         // This should be good enough and simplify things a lot.
         return !isStreamIdValid(stream.id()) || isWritable(stream);
+    }
+
+    /**
+     * The current status of the read-processing for a {@link Http2StreamChannel}.
+     */
+    private enum ReadStatus {
+        /**
+         * No read in progress and no read was requested (yet)
+         */
+        IDLE,
+
+        /**
+         * Reading in progress
+         */
+        IN_PROGRESS,
+
+        /**
+         * A read operation was requested.
+         */
+        REQUESTED
     }
 
     // TODO: Handle writability changes due writing from outside the eventloop.
@@ -461,13 +464,15 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
         private volatile boolean writable;
 
         private boolean outboundClosed;
+
         /**
-         * This variable represents if a read is in progress for the current channel. Note that depending upon the
-         * {@link RecvByteBufAllocator} behavior a read may extend beyond the {@link Http2ChannelUnsafe#beginRead()}
-         * method scope. The {@link Http2ChannelUnsafe#beginRead()} loop may drain all pending data, and then if the
-         * parent channel is reading this channel may still accept frames.
+         * This variable represents if a read is in progress for the current channel or was requested.
+         * Note that depending upon the {@link RecvByteBufAllocator} behavior a read may extend beyond the
+         * {@link Http2ChannelUnsafe#beginRead()} method scope. The {@link Http2ChannelUnsafe#beginRead()} loop may
+         * drain all pending data, and then if the parent channel is reading this channel may still accept frames.
          */
-        private boolean readInProgress;
+        private ReadStatus readStatus = ReadStatus.IDLE;
+
         private Queue<Object> inboundBuffer;
 
         /** {@code true} after the first HEADERS frame has been written **/
@@ -757,9 +762,9 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
             assert eventLoop().inEventLoop();
             if (!isActive()) {
                 ReferenceCountUtil.release(frame);
-            } else if (readInProgress) {
-                // If readInProgress there cannot be anything in the queue, otherwise we would have drained it from the
-                // queue and processed it during the read cycle.
+            } else if (readStatus != ReadStatus.IDLE) {
+                // If a read is in progress or has been requested, there cannot be anything in the queue,
+                // otherwise we would have drained it from the queue and processed it during the read cycle.
                 assert inboundBuffer == null || inboundBuffer.isEmpty();
                 final Handle allocHandle = unsafe.recvBufAllocHandle();
                 unsafe.doRead0(frame, allocHandle);
@@ -783,7 +788,7 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
 
         void fireChildReadComplete() {
             assert eventLoop().inEventLoop();
-            assert readInProgress;
+            assert readStatus != ReadStatus.IDLE;
             unsafe.notifyReadComplete(unsafe.recvBufAllocHandle());
         }
 
@@ -985,11 +990,20 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
 
             @Override
             public void beginRead() {
-                if (readInProgress || !isActive()) {
+                if (!isActive()) {
                     return;
                 }
-                readInProgress = true;
-                doBeginRead();
+                switch (readStatus) {
+                    case IDLE:
+                        readStatus = ReadStatus.IN_PROGRESS;
+                        doBeginRead();
+                        break;
+                    case IN_PROGRESS:
+                        readStatus = ReadStatus.REQUESTED;
+                        break;
+                    default:
+                        break;
+                }
             }
 
             void doBeginRead() {
@@ -1026,7 +1040,11 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
 
             void notifyReadComplete(Handle allocHandle) {
                 assert next == null && previous == null;
-                readInProgress = false;
+                if (readStatus == ReadStatus.REQUESTED) {
+                    readStatus = ReadStatus.IN_PROGRESS;
+                } else {
+                    readStatus = ReadStatus.IDLE;
+                }
                 allocHandle.readComplete();
                 pipeline().fireChannelReadComplete();
                 // Reading data may result in frames being written (e.g. WINDOW_UPDATE, RST, etc..). If the parent
@@ -1049,7 +1067,7 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
                     allocHandle.lastBytesRead(numBytesToBeConsumed);
                     if (numBytesToBeConsumed != 0) {
                         try {
-                            writeDoneAndNoFlush |= onBytesConsumed(ctx, stream, numBytesToBeConsumed);
+                            writeDoneAndNoFlush |= consumeBytes(stream.id(), numBytesToBeConsumed);
                         } catch (Http2Exception e) {
                             pipeline().fireExceptionCaught(e);
                         }

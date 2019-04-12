@@ -47,6 +47,7 @@ import io.netty.resolver.InetNameResolver;
 import io.netty.resolver.ResolvedAddressTypes;
 import io.netty.util.NetUtil;
 import io.netty.util.ReferenceCountUtil;
+import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.FastThreadLocal;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.FutureListener;
@@ -374,7 +375,7 @@ public class DnsNameResolver extends InetNameResolver {
             default:
                 throw new IllegalArgumentException("Unknown ResolvedAddressTypes " + resolvedAddressTypes);
         }
-        preferredAddressType = preferredAddressType(resolvedAddressTypes);
+        preferredAddressType = preferredAddressType(this.resolvedAddressTypes);
         this.authoritativeDnsServerCache = checkNotNull(authoritativeDnsServerCache, "authoritativeDnsServerCache");
         nameServerComparator = new NameServerComparator(preferredAddressType.addressType());
 
@@ -860,13 +861,19 @@ public class DnsNameResolver extends InetNameResolver {
 
     static <T> void trySuccess(Promise<T> promise, T result) {
         if (!promise.trySuccess(result)) {
-            logger.warn("Failed to notify success ({}) to a promise: {}", result, promise);
+            // There is nothing really wrong with not be able to notify the promise as we may have raced here because
+            // of multiple queries that have been executed. Log it with trace level anyway just in case the user
+            // wants to better understand what happened.
+            logger.trace("Failed to notify success ({}) to a promise: {}", result, promise);
         }
     }
 
     private static void tryFailure(Promise<?> promise, Throwable cause) {
         if (!promise.tryFailure(cause)) {
-            logger.warn("Failed to notify failure to a promise: {}", promise, cause);
+            // There is nothing really wrong with not be able to notify the promise as we may have raced here because
+            // of multiple queries that have been executed. Log it with trace level anyway just in case the user
+            // wants to better understand what happened.
+            logger.trace("Failed to notify failure to a promise: {}", promise, cause);
         }
     }
 
@@ -962,10 +969,32 @@ public class DnsNameResolver extends InetNameResolver {
         }
     }
 
-    private void doResolveAllUncached(String hostname,
+    private void doResolveAllUncached(final String hostname,
+                                      final DnsRecord[] additionals,
+                                      final Promise<List<InetAddress>> promise,
+                                      final DnsCache resolveCache) {
+        // Call doResolveUncached0(...) in the EventLoop as we may need to submit multiple queries which would need
+        // to submit multiple Runnable at the end if we are not already on the EventLoop.
+        EventExecutor executor = executor();
+        if (executor.inEventLoop()) {
+            doResolveAllUncached0(hostname, additionals, promise, resolveCache);
+        } else {
+            executor.execute(new Runnable() {
+                @Override
+                public void run() {
+                    doResolveAllUncached0(hostname, additionals, promise, resolveCache);
+                }
+            });
+        }
+    }
+
+    private void doResolveAllUncached0(String hostname,
                                       DnsRecord[] additionals,
                                       Promise<List<InetAddress>> promise,
                                       DnsCache resolveCache) {
+
+        assert executor().inEventLoop();
+
         final DnsServerAddressStream nameServerAddrs =
                 dnsServerAddressStreamProvider.nameServerAddressStream(hostname);
         new DnsAddressResolveContext(this, hostname, additionals, nameServerAddrs,
@@ -1014,8 +1043,8 @@ public class DnsNameResolver extends InetNameResolver {
     public Future<AddressedEnvelope<DnsResponse, InetSocketAddress>> query(
             InetSocketAddress nameServerAddr, DnsQuestion question) {
 
-        return query0(nameServerAddr, question, EMPTY_ADDITIONALS,
-                ch.eventLoop().<AddressedEnvelope<? extends DnsResponse, InetSocketAddress>>newPromise());
+        return query0(nameServerAddr, question, EMPTY_ADDITIONALS, true, ch.newPromise(),
+                      ch.eventLoop().<AddressedEnvelope<? extends DnsResponse, InetSocketAddress>>newPromise());
     }
 
     /**
@@ -1024,8 +1053,8 @@ public class DnsNameResolver extends InetNameResolver {
     public Future<AddressedEnvelope<DnsResponse, InetSocketAddress>> query(
             InetSocketAddress nameServerAddr, DnsQuestion question, Iterable<DnsRecord> additionals) {
 
-        return query0(nameServerAddr, question, toArray(additionals, false),
-                ch.eventLoop().<AddressedEnvelope<? extends DnsResponse, InetSocketAddress>>newPromise());
+        return query0(nameServerAddr, question, toArray(additionals, false), true, ch.newPromise(),
+                     ch.eventLoop().<AddressedEnvelope<? extends DnsResponse, InetSocketAddress>>newPromise());
     }
 
     /**
@@ -1035,7 +1064,7 @@ public class DnsNameResolver extends InetNameResolver {
             InetSocketAddress nameServerAddr, DnsQuestion question,
             Promise<AddressedEnvelope<? extends DnsResponse, InetSocketAddress>> promise) {
 
-        return query0(nameServerAddr, question, EMPTY_ADDITIONALS, promise);
+        return query0(nameServerAddr, question, EMPTY_ADDITIONALS, true, ch.newPromise(), promise);
     }
 
     /**
@@ -1046,7 +1075,7 @@ public class DnsNameResolver extends InetNameResolver {
             Iterable<DnsRecord> additionals,
             Promise<AddressedEnvelope<? extends DnsResponse, InetSocketAddress>> promise) {
 
-        return query0(nameServerAddr, question, toArray(additionals, false), promise);
+        return query0(nameServerAddr, question, toArray(additionals, false), true, ch.newPromise(), promise);
     }
 
     /**
@@ -1067,16 +1096,14 @@ public class DnsNameResolver extends InetNameResolver {
         return cause != null && cause.getCause() instanceof DnsNameResolverTimeoutException;
     }
 
-    final Future<AddressedEnvelope<DnsResponse, InetSocketAddress>> query0(
-            InetSocketAddress nameServerAddr, DnsQuestion question,
-            DnsRecord[] additionals,
-            Promise<AddressedEnvelope<? extends DnsResponse, InetSocketAddress>> promise) {
-        return query0(nameServerAddr, question, additionals, ch.newPromise(), promise);
+    final void flushQueries() {
+        ch.flush();
     }
 
     final Future<AddressedEnvelope<DnsResponse, InetSocketAddress>> query0(
             InetSocketAddress nameServerAddr, DnsQuestion question,
             DnsRecord[] additionals,
+            boolean flush,
             ChannelPromise writePromise,
             Promise<AddressedEnvelope<? extends DnsResponse, InetSocketAddress>> promise) {
         assert !writePromise.isVoid();
@@ -1084,7 +1111,8 @@ public class DnsNameResolver extends InetNameResolver {
         final Promise<AddressedEnvelope<DnsResponse, InetSocketAddress>> castPromise = cast(
                 checkNotNull(promise, "promise"));
         try {
-            new DnsQueryContext(this, nameServerAddr, question, additionals, castPromise).query(writePromise);
+            new DnsQueryContext(this, nameServerAddr, question, additionals, castPromise)
+                    .query(flush, writePromise);
             return castPromise;
         } catch (Exception e) {
             return castPromise.setFailure(e);

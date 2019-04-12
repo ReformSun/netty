@@ -32,8 +32,6 @@ import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Queue;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
@@ -229,6 +227,11 @@ class EpollEventLoop extends SingleThreadEventLoop {
         this.ioRatio = ioRatio;
     }
 
+    @Override
+    public int registeredChannels() {
+        return channels.size();
+    }
+
     private int epollWait(boolean oldWakeup) throws IOException {
         // If a task was submitted when wakenUp value was 1, the task didn't get a chance to produce wakeup event.
         // So we need to check task queue again before calling epoll_wait. If we don't, the task might be pended
@@ -379,13 +382,9 @@ class EpollEventLoop extends SingleThreadEventLoop {
         }
         // Using the intermediate collection to prevent ConcurrentModificationException.
         // In the `close()` method, the channel is deleted from `channels` map.
-        Collection<AbstractEpollChannel> array = new ArrayList<AbstractEpollChannel>(channels.size());
+        AbstractEpollChannel[] localChannels = channels.values().toArray(new AbstractEpollChannel[0]);
 
-        for (AbstractEpollChannel channel: channels.values()) {
-            array.add(channel);
-        }
-
-        for (AbstractEpollChannel ch: array) {
+        for (AbstractEpollChannel ch : localChannels) {
             ch.unsafe().close(ch.unsafe().voidPromise());
         }
     }

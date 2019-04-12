@@ -15,6 +15,7 @@
  */
 package io.netty.buffer;
 
+import io.netty.util.AsciiString;
 import io.netty.util.ByteProcessor;
 import io.netty.util.CharsetUtil;
 import io.netty.util.IllegalReferenceCountException;
@@ -37,6 +38,7 @@ import java.nio.channels.ScatteringByteChannel;
 import java.nio.charset.Charset;
 
 import static io.netty.util.internal.MathUtil.isOutOfBounds;
+import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
 
 /**
  * A skeletal implementation of a buffer.
@@ -45,7 +47,7 @@ public abstract class AbstractByteBuf extends ByteBuf {
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(AbstractByteBuf.class);
     private static final String LEGACY_PROP_CHECK_ACCESSIBLE = "io.netty.buffer.bytebuf.checkAccessible";
     private static final String PROP_CHECK_ACCESSIBLE = "io.netty.buffer.checkAccessible";
-    private static final boolean checkAccessible;
+    static final boolean checkAccessible; // accessed from CompositeByteBuf
     private static final String PROP_CHECK_BOUNDS = "io.netty.buffer.checkBounds";
     private static final boolean checkBounds;
 
@@ -72,9 +74,7 @@ public abstract class AbstractByteBuf extends ByteBuf {
     private int maxCapacity;
 
     protected AbstractByteBuf(int maxCapacity) {
-        if (maxCapacity < 0) {
-            throw new IllegalArgumentException("maxCapacity: " + maxCapacity + " (expected: >= 0)");
-        }
+        checkPositiveOrZero(maxCapacity, "maxCapacity");
         this.maxCapacity = maxCapacity;
     }
 
@@ -270,10 +270,7 @@ public abstract class AbstractByteBuf extends ByteBuf {
 
     @Override
     public ByteBuf ensureWritable(int minWritableBytes) {
-        if (minWritableBytes < 0) {
-            throw new IllegalArgumentException(String.format(
-                    "minWritableBytes: %d (expected: >= 0)", minWritableBytes));
-        }
+        checkPositiveOrZero(minWritableBytes, "minWritableBytes");
         ensureWritable0(minWritableBytes);
         return this;
     }
@@ -301,10 +298,7 @@ public abstract class AbstractByteBuf extends ByteBuf {
     @Override
     public int ensureWritable(int minWritableBytes, boolean force) {
         ensureAccessible();
-        if (minWritableBytes < 0) {
-            throw new IllegalArgumentException(String.format(
-                    "minWritableBytes: %d (expected: >= 0)", minWritableBytes));
-        }
+        checkPositiveOrZero(minWritableBytes, "minWritableBytes");
 
         if (minWritableBytes <= writableBytes()) {
             return 0;
@@ -331,11 +325,11 @@ public abstract class AbstractByteBuf extends ByteBuf {
 
     @Override
     public ByteBuf order(ByteOrder endianness) {
-        if (endianness == null) {
-            throw new NullPointerException("endianness");
-        }
         if (endianness == order()) {
             return this;
+        }
+        if (endianness == null) {
+            throw new NullPointerException("endianness");
         }
         return newSwappedByteBuf();
     }
@@ -503,7 +497,10 @@ public abstract class AbstractByteBuf extends ByteBuf {
 
     @Override
     public CharSequence getCharSequence(int index, int length, Charset charset) {
-        // TODO: We could optimize this for UTF8 and US_ASCII
+        if (CharsetUtil.US_ASCII.equals(charset) || CharsetUtil.ISO_8859_1.equals(charset)) {
+            // ByteBufUtil.getBytes(...) will return a new copy which the AsciiString uses directly
+            return new AsciiString(ByteBufUtil.getBytes(this, index, length, true), false);
+        }
         return toString(index, length, charset);
     }
 
@@ -1289,7 +1286,7 @@ public abstract class AbstractByteBuf extends ByteBuf {
         }
     }
 
-    private int forEachByteAsc0(int start, int end, ByteProcessor processor) throws Exception {
+    int forEachByteAsc0(int start, int end, ByteProcessor processor) throws Exception {
         for (; start < end; ++start) {
             if (!processor.process(_getByte(start))) {
                 return start;
@@ -1321,7 +1318,7 @@ public abstract class AbstractByteBuf extends ByteBuf {
         }
     }
 
-    private int forEachByteDesc0(int rStart, final int rEnd, ByteProcessor processor) throws Exception {
+    int forEachByteDesc0(int rStart, final int rEnd, ByteProcessor processor) throws Exception {
         for (; rStart >= rEnd; --rStart) {
             if (!processor.process(_getByte(rStart))) {
                 return rStart;
@@ -1410,9 +1407,7 @@ public abstract class AbstractByteBuf extends ByteBuf {
      * than the specified value.
      */
     protected final void checkReadableBytes(int minimumReadableBytes) {
-        if (minimumReadableBytes < 0) {
-            throw new IllegalArgumentException("minimumReadableBytes: " + minimumReadableBytes + " (expected: >= 0)");
-        }
+        checkPositiveOrZero(minimumReadableBytes, "minimumReadableBytes");
         checkReadableBytes0(minimumReadableBytes);
     }
 
@@ -1442,17 +1437,9 @@ public abstract class AbstractByteBuf extends ByteBuf {
      * if the buffer was released before.
      */
     protected final void ensureAccessible() {
-        if (checkAccessible && internalRefCnt() == 0) {
+        if (checkAccessible && !isAccessible()) {
             throw new IllegalReferenceCountException(0);
         }
-    }
-
-    /**
-     * Returns the reference count that is used internally by {@link #ensureAccessible()} to try to guard
-     * against using the buffer after it was released (best-effort).
-     */
-    int internalRefCnt() {
-        return refCnt();
     }
 
     final void setIndex0(int readerIndex, int writerIndex) {

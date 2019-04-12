@@ -424,8 +424,8 @@ class WrappedCompositeByteBuf extends CompositeByteBuf {
     }
 
     @Override
-    int internalRefCnt() {
-        return wrapped.internalRefCnt();
+    final boolean isAccessible() {
+        return wrapped.isAccessible();
     }
 
     @Override
@@ -545,6 +545,12 @@ class WrappedCompositeByteBuf extends CompositeByteBuf {
     @Override
     public CompositeByteBuf addComponent(boolean increaseWriterIndex, int cIndex, ByteBuf buffer) {
         wrapped.addComponent(increaseWriterIndex, cIndex, buffer);
+        return this;
+    }
+
+    @Override
+    public CompositeByteBuf addFlattenedComponents(boolean increaseWriterIndex, ByteBuf buffer) {
+        wrapped.addFlattenedComponents(increaseWriterIndex, buffer);
         return this;
     }
 
